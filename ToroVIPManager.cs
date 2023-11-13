@@ -2,19 +2,60 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Oxide.Core;
-using Oxide.Core.Plugins;
 using Oxide.Core.Libraries.Covalence;
+using Oxide.Core.Plugins;
 using Newtonsoft.Json;
+using System.Net.Http;
+using System.Text;
+using System.Net;
+using static Oxide.Plugins.ToroVIPManager;
 
 namespace Oxide.Plugins
 {
     [Info("ToroVIPManager", "Yac Vaguer", "1.0.1")]
     [Description("Manage VIP status with expiration")]
-    class ToroVIPManager : CovalencePlugin
+    class ToroVIPManager : RustPlugin
     {
-        private Dictionary<ulong, DateTime> activeVIPs = new Dictionary<ulong, DateTime>();
-        private string dataFile = Path.Combine(Interface.Oxide.DataDirectory, "VIPManager/active.json");
+        private Dictionary<ulong, VIPEntry> activeVIPs = new Dictionary<ulong, VIPEntry>();
+        private string dataFile = Path.Combine(Interface.Oxide.DataDirectory, "VIPManager/active-vip");
         private ConfigData configData;
+        private VIPEntry vipEntry;
+
+        [ConsoleCommand("vip.add")]
+        void GrantUserVIPStatus(ConsoleSystem.Arg arg)
+        {
+            if (arg.Args == null || arg.Args.Length != 2)
+            {
+                Puts("Usage: vip.add <STEAMID> <REWARD_POINTS>");
+                return;
+            }
+
+            string steamID = arg.Args[0];
+            string serverReward = arg.Args[1];
+            ulong userID;
+
+            if (!ulong.TryParse(steamID, out userID))
+            {
+                Puts("Invalid STEAMID");
+                return;
+            }
+            Puts("------------------------------");
+            Puts(" ");
+            Puts($"Setting VIP Status for {userID}");
+            AddOrUpdateVIPToDB(userID);
+            AddUserToVipGroup(userID);
+            AddPerks(userID);
+            AddServerRewards(userID, serverReward);
+
+            Puts($"Added/extended VIP for {steamID}");
+            Puts("");
+
+            SaveData(userID);
+            Puts("------------------------------");
+
+            SendDiscordMessage($"User {userID} activated as VIP for 30 days");
+        }
+
 
         void OnServerInitialized()
         {
@@ -22,19 +63,14 @@ namespace Oxide.Plugins
             LoadConfigVariables();
         }
 
-        void Unload()
-        {
-            SaveData();
-            SaveConfig();
-        }
-
         private void LoadData()
         {
-            activeVIPs = Interface.GetMod().DataFileSystem.ReadObject<Dictionary<ulong, DateTime>>(dataFile);
+            activeVIPs = Interface.GetMod().DataFileSystem.ReadObject<Dictionary<ulong, VIPEntry>>(dataFile);
         }
 
-        private void SaveData()
+        private void SaveData(ulong userID)
         {
+            activeVIPs[userID] = vipEntry;
             Interface.GetMod().DataFileSystem.WriteObject(dataFile, activeVIPs);
         }
 
@@ -48,63 +84,110 @@ namespace Oxide.Plugins
             Config.WriteObject(configData, true);
         }
 
-        void AddOrUpdateVIP(ulong userID)
+        VIPEntry GetVipEntry(ulong userID)
         {
-            DateTime expiration;
-            if (activeVIPs.ContainsKey(userID) && activeVIPs[userID] > DateTime.Now)
+            if (!activeVIPs.TryGetValue(userID, out VIPEntry vipEntry))
             {
-                expiration = activeVIPs[userID].AddDays(30);
+                vipEntry = new VIPEntry();
+            }
+
+            return vipEntry;
+        }
+
+        void AddOrUpdateVIPToDB(ulong userID)
+        {
+            vipEntry = GetVipEntry(userID);
+
+            if (vipEntry.Expiration > DateTime.Now)
+            {
+                vipEntry.Expiration = vipEntry.Expiration.AddDays(30);
             }
             else
             {
-                expiration = DateTime.Now.AddDays(30);
+                vipEntry.Expiration = DateTime.Now.AddDays(30);
             }
 
-            activeVIPs[userID] = expiration;
-            SaveData();
+            vipEntry.Status = "enabled";
+            Puts($"User {userID} added to the Database as VIP");
+            Puts("");
+        }
 
-            // Execute the list of commands for adding a user to VIP
-            foreach (string command in configData.Commands.AddCommands)
+        void AddUserToVipGroup(ulong userID)
+        {
+            ConsoleSystem.Run(ConsoleSystem.Option.Server, "oxide.usergroup add " + userID.ToString() + " vip");
+            Puts($"User {userID} Granted VIP features");
+            Puts("");
+        }
+        
+        void ExpireVIP(ulong userID)
+        {
+            if (activeVIPs.TryGetValue(userID, out VIPEntry vipEntry))
             {
-                ConsoleSystem.Run(ConsoleSystem.Option.Server.Normal, command.Replace("{STEAMID}", userID.ToString()));
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, "oxide.usergroup remove " + userID.ToString() + " vip");
+                vipEntry.Status = "disabled";
+                SaveData(userID);
             }
         }
 
-        void ExpireVIP(ulong userID)
+        void AddServerRewards(ulong userID, string serverRewardPoints)
         {
-            if (activeVIPs.ContainsKey(userID))
-            {
-                activeVIPs.Remove(userID);
-                SaveData();
+            ConsoleSystem.Run(ConsoleSystem.Option.Server, "sr add " + userID.ToString() + " " + serverRewardPoints);
+            Puts("We added " + serverRewardPoints + " to " + userID);
+            Puts("");
+            ConsoleSystem.Run(ConsoleSystem.Option.Server, "sr check " + userID.ToString());
+        }
 
-                // Execute the list of commands for removing a user from VIP
-                foreach (string command in configData.Commands.RemoveCommands)
+        void AddPerks(ulong userID)
+        {
+
+            if (!vipEntry.Bonus)
+            {
+                vipEntry.Bonus = true;
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, "zl.lvl " + userID.ToString() + " * +5");
+                Puts($"We added Perks to {userID}");
+                return;
+            }
+            
+            Puts("Perks were given before");
+            
+        }
+
+        private void SendDiscordMessage(string message)
+        {
+            if (configData == null)
+            {
+                Puts("Config data is not loaded.");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(configData.DiscordWebhookUrl))
+            {
+                Puts("Discord webhook URL is not configured.");
+                return;
+            }
+
+            var payload = JsonConvert.SerializeObject(new { content = message });
+
+            using (var client = new WebClient())
+            {
+                client.Headers[HttpRequestHeader.ContentType] = "application/json";
+
+                try
                 {
-                    ConsoleSystem.Run(ConsoleSystem.Option.Server.Normal, command.Replace("{STEAMID}", userID.ToString()));
+                    client.UploadString(configData.DiscordWebhookUrl, "POST", payload);
+                }
+                catch (Exception ex)
+                {
+                    Puts($"Error sending Discord message: {ex.Message}");
                 }
             }
         }
 
-        [ConsoleCommand("vip.add")]
-        void cmdVIPAdd(ConsoleSystem.Arg arg)
+        public class VIPEntry
         {
-            if (arg.Args == null || arg.Args.Length != 1)
-            {
-                Puts("Usage: vip.add <STEAMID>");
-                return;
-            }
-
-            string steamID = arg.Args[0];
-            ulong userID;
-            if (ulong.TryParse(steamID, out userID))
-            {
-                AddOrUpdateVIP(userID);
-                Puts($"Added/extended VIP for {steamID}");
-            }
-            else
-            {
-                Puts("Invalid STEAMID");
-            }
+            public DateTime Expiration { get; set; }
+            public bool Bonus { get; set; }
+            public string Status { get; set; }
         }
 
         class ConfigData
@@ -124,6 +207,3 @@ namespace Oxide.Plugins
 
     }
 }
-
-
-
