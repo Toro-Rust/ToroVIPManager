@@ -24,6 +24,12 @@ namespace Oxide.Plugins
         [ConsoleCommand("vip.add")]
         void GrantUserVIPStatus(ConsoleSystem.Arg arg)
         {
+            if (!arg.IsAdmin)
+            {
+                Puts("You don't have permission to use this command.");
+                return;
+            }
+    
             if (arg.Args == null || arg.Args.Length != 2)
             {
                 Puts("Usage: vip.add <STEAMID> <REWARD_POINTS>");
