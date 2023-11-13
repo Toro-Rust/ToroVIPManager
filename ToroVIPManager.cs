@@ -50,7 +50,9 @@ namespace Oxide.Plugins
             Puts($"Added/extended VIP for {steamID}");
             Puts("");
 
-            SaveData(userID);
+            activeVIPs[userID] = vipEntry;
+            SaveData();
+
             Puts("------------------------------");
 
             SendDiscordMessage($"User {userID} activated as VIP for 30 days");
@@ -61,6 +63,35 @@ namespace Oxide.Plugins
         {
             LoadData();
             LoadConfigVariables();
+            CheckExpiredVIPs();
+        }
+
+        private void CheckExpiredVIPs()
+        {
+            Puts("------------------------------");
+            Puts("");
+            Puts("Checking Expired VIPs");
+            List<ulong> expiredVIPs = new List<ulong>();
+
+            foreach (KeyValuePair<ulong, VIPEntry> kvp in activeVIPs)
+            {
+                ulong userID = kvp.Key;
+                VIPEntry vipEntry = kvp.Value;
+
+                if (vipEntry != null && vipEntry.Expiration < DateTime.Now && vipEntry.Status == "enabled")
+                {
+                    expiredVIPs.Add(userID);
+                }
+            }
+
+            foreach (ulong userID in expiredVIPs)
+            {
+                ExpireVIP(userID);
+            }
+
+            Puts("Check Finished");
+            Puts("------------------------------");
+            Puts("");
         }
 
         private void LoadData()
@@ -68,9 +99,8 @@ namespace Oxide.Plugins
             activeVIPs = Interface.GetMod().DataFileSystem.ReadObject<Dictionary<ulong, VIPEntry>>(dataFile);
         }
 
-        private void SaveData(ulong userID)
+        private void SaveData()
         {
-            activeVIPs[userID] = vipEntry;
             Interface.GetMod().DataFileSystem.WriteObject(dataFile, activeVIPs);
         }
 
@@ -125,7 +155,11 @@ namespace Oxide.Plugins
             {
                 ConsoleSystem.Run(ConsoleSystem.Option.Server, "oxide.usergroup remove " + userID.ToString() + " vip");
                 vipEntry.Status = "disabled";
-                SaveData(userID);
+
+                activeVIPs[userID] = vipEntry;
+                SaveData();
+                Puts($"{userID} VIP expired and it was removed from our VIPs");
+                SendDiscordMessage($"{userID} VIP expired and it was removed from our VIPs");
             }
         }
 
